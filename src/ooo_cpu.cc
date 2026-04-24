@@ -126,6 +126,183 @@ void O3_CPU::initialize_instruction()
 
 namespace
 {
+constexpr uint32_t TRACKMAKER_TOKEN_WIDTH = 3;
+constexpr uint32_t TRACKMAKER_HISTORY_LENGTH = 6;
+constexpr uint32_t TRACKMAKER_HISTORY_MASK = (1U << (TRACKMAKER_TOKEN_WIDTH * TRACKMAKER_HISTORY_LENGTH)) - 1U;
+
+int history_count_token(uint32_t history_bits, uint8_t token)
+{
+  int count = 0;
+  for (uint32_t i = 0; i < TRACKMAKER_HISTORY_LENGTH; ++i) {
+    if ((history_bits & 0x7U) == token) {
+      ++count;
+    }
+    history_bits >>= TRACKMAKER_TOKEN_WIDTH;
+  }
+  return count;
+}
+
+int history_count_non_none(uint32_t history_bits)
+{
+  int count = 0;
+  for (uint32_t i = 0; i < TRACKMAKER_HISTORY_LENGTH; ++i) {
+    if ((history_bits & 0x7U) != TK_OP_NONE) {
+      ++count;
+    }
+    history_bits >>= TRACKMAKER_TOKEN_WIDTH;
+  }
+  return count;
+}
+
+uint32_t compress_consecutive_add_like(uint32_t history_bits)
+{
+  std::array<uint8_t, TRACKMAKER_HISTORY_LENGTH> tokens{};
+  for (uint32_t i = 0; i < TRACKMAKER_HISTORY_LENGTH; ++i) {
+    tokens[TRACKMAKER_HISTORY_LENGTH - 1 - i] = static_cast<uint8_t>(history_bits & 0x7U);
+    history_bits >>= TRACKMAKER_TOKEN_WIDTH;
+  }
+
+  uint32_t out = 0;
+  uint8_t prev = TK_OP_NONE;
+  uint32_t count = 0;
+  for (auto token : tokens) {
+    if (token == TK_OP_NONE) {
+      continue;
+    }
+    const bool add_like = (token == TK_OP_ADD || token == TK_OP_LEA);
+    const bool prev_add_like = (prev == TK_OP_ADD || prev == TK_OP_LEA);
+    if (add_like && prev_add_like) {
+      continue;
+    }
+    out = ((out << TRACKMAKER_TOKEN_WIDTH) | token) & TRACKMAKER_HISTORY_MASK;
+    prev = token;
+    if (++count >= TRACKMAKER_HISTORY_LENGTH) {
+      break;
+    }
+  }
+
+  return out;
+}
+
+uint8_t trackmaker_complexity(uint8_t token)
+{
+  switch (token) {
+  case TK_OP_NONE:
+    return 0;
+  case TK_OP_MOV:
+    return 1;
+  case TK_OP_ADD:
+  case TK_OP_LEA:
+    return 2;
+  case TK_OP_SHIFT:
+    return 3;
+  case TK_OP_MUL:
+    return 4;
+  case TK_OP_LOAD:
+    return 5;
+  default:
+    return 2;
+  }
+}
+
+register_history append_token(register_history history, uint8_t token)
+{
+  history.valid = true;
+  history.last_token = token;
+  history.depth = static_cast<uint8_t>(std::min<unsigned>(std::numeric_limits<uint8_t>::max(), history.depth + 1U));
+  history.complexity = std::max(history.complexity, trackmaker_complexity(token));
+  history.history_bits = ((history.history_bits << TRACKMAKER_TOKEN_WIDTH) | token) & TRACKMAKER_HISTORY_MASK;
+  if (token == TK_OP_LOAD) {
+    history.load_derived = true;
+  }
+  return history;
+}
+
+register_history choose_dominant_history(register_history lhs, register_history rhs)
+{
+  if (!lhs.valid) {
+    return rhs;
+  }
+  if (!rhs.valid) {
+    return lhs;
+  }
+  if (lhs.load_derived != rhs.load_derived) {
+    return rhs.load_derived ? rhs : lhs;
+  }
+  if (rhs.complexity > lhs.complexity) {
+    return rhs;
+  }
+  if (rhs.complexity == lhs.complexity && rhs.depth > lhs.depth) {
+    return rhs;
+  }
+  return lhs;
+}
+
+trackmaker_load_class classify_trackmaker_load(const register_history& history)
+{
+  if (!history.valid || history.history_bits == 0) {
+    return TRACKMAKER_LOAD_SIMPLE;
+  }
+
+  const uint32_t normalized_history = compress_consecutive_add_like(history.history_bits);
+  const int load_count = history_count_token(normalized_history, TK_OP_LOAD);
+  const int add_count = history_count_token(normalized_history, TK_OP_ADD) + history_count_token(normalized_history, TK_OP_LEA);
+  const int shift_count = history_count_token(normalized_history, TK_OP_SHIFT);
+  const int mul_count = history_count_token(normalized_history, TK_OP_MUL);
+  const int other_count = history_count_token(normalized_history, TK_OP_OTHER);
+  const int mov_count = history_count_token(normalized_history, TK_OP_MOV);
+  const int non_none_count = history_count_non_none(normalized_history);
+
+  const bool has_load = load_count > 0;
+  const bool has_add = add_count > 0;
+  const bool has_shift = shift_count > 0;
+  const bool has_mul = mul_count > 0;
+  const bool has_other = other_count > 0;
+
+  if (has_mul) {
+    return TRACKMAKER_LOAD_COMPLEX;
+  }
+  if (load_count >= 2) {
+    return TRACKMAKER_LOAD_DEP_DEEP;
+  }
+  if (load_count == 1 && !has_mul) {
+    if (!has_other && non_none_count <= 6) {
+      return TRACKMAKER_LOAD_DEP_1;
+    }
+  }
+  if (!has_load && !has_mul && (has_add || has_shift)) {
+    return TRACKMAKER_LOAD_AFFINE;
+  }
+  if (!has_load && !has_mul && !has_other && (non_none_count <= 2 || (add_count <= 2 && shift_count == 0 && mov_count <= 1))) {
+    return TRACKMAKER_LOAD_SIMPLE;
+  }
+  if (has_other && (has_load || has_shift || has_add)) {
+    return TRACKMAKER_LOAD_COMPLEX;
+  }
+  if (non_none_count == 0) {
+    return TRACKMAKER_LOAD_SIMPLE;
+  }
+  return TRACKMAKER_LOAD_UNKNOWN;
+}
+
+void record_trackmaker_load_stats(cpu_stats& stats, champsim::address ip, const register_history& history, std::size_t load_count)
+{
+  const auto load_class = classify_trackmaker_load(history);
+  auto& per_pc = stats.trackmaker_load_pc_classes[ip.to<uint64_t>()];
+  for (std::size_t i = 0; i < load_count; ++i) {
+    ++stats.trackmaker_loads;
+    if (history.load_derived) {
+      ++stats.trackmaker_loads_load_derived;
+    }
+    ++stats.trackmaker_load_classes[load_class];
+    ++per_pc[load_class];
+    stats.trackmaker_load_depth.increment(history.depth);
+    stats.trackmaker_load_complexity.increment(history.complexity);
+    stats.trackmaker_load_last_token.increment(history.last_token);
+    stats.trackmaker_load_history_bits.increment(history.history_bits);
+  }
+}
+
 void do_stack_pointer_folding(ooo_model_instr& arch_instr)
 {
   // The exact, true value of the stack pointer for any given instruction can usually be determined immediately after the instruction is decoded without
@@ -451,6 +628,59 @@ long O3_CPU::schedule_instruction()
 
 void O3_CPU::do_scheduling(ooo_model_instr& instr)
 {
+  const auto source_arch_regs = instr.source_registers;
+  const auto destination_arch_regs = instr.destination_registers;
+
+  register_history merged_history{};
+  for (auto src_reg : source_arch_regs) {
+    auto src_history = reg_allocator.read_arch_history(static_cast<uint8_t>(src_reg));
+    merged_history = choose_dominant_history(merged_history, src_history);
+  }
+
+  if (!instr.source_memory.empty()) {
+    const bool stack_only_address =
+        !source_arch_regs.empty()
+        && std::all_of(std::begin(source_arch_regs), std::end(source_arch_regs),
+                       [](auto reg) { return reg == champsim::REG_STACK_POINTER || reg == champsim::REG_FLAGS || reg == champsim::REG_INSTRUCTION_POINTER; });
+    register_history address_history{};
+    if (!stack_only_address) {
+      for (auto src_reg : source_arch_regs) {
+        const bool writes_same_reg = std::find(std::begin(destination_arch_regs), std::end(destination_arch_regs), src_reg) != std::end(destination_arch_regs);
+        const bool is_special_reg = (src_reg == champsim::REG_FLAGS || src_reg == champsim::REG_INSTRUCTION_POINTER);
+        if (writes_same_reg || is_special_reg) {
+          continue;
+        }
+        auto src_history = reg_allocator.read_arch_history(static_cast<uint8_t>(src_reg));
+        address_history = choose_dominant_history(address_history, src_history);
+      }
+
+      if (!address_history.valid) {
+        address_history = merged_history;
+      }
+    }
+    record_trackmaker_load_stats(sim_stats, instr.ip, address_history, instr.source_memory.size());
+  }
+
+  register_history destination_history = merged_history;
+  destination_history.source_count =
+      static_cast<uint8_t>(std::min<std::size_t>(std::numeric_limits<uint8_t>::max(), source_arch_regs.size()));
+
+  if (instr.op_trace.valid) {
+    if (instr.op_trace.token == TK_OP_MOV) {
+      if (!merged_history.valid) {
+        destination_history = append_token(destination_history, TK_OP_MOV);
+      } else {
+        destination_history.valid = true;
+        destination_history.last_token = merged_history.last_token;
+        destination_history.complexity = merged_history.complexity;
+      }
+    } else {
+      destination_history = append_token(destination_history, instr.op_trace.token);
+    }
+  } else if (!destination_history.valid && !destination_arch_regs.empty()) {
+    destination_history.valid = true;
+  }
+
   // Mark register dependencies
   for (auto& src_reg : instr.source_registers) {
     // rename source register
@@ -460,6 +690,10 @@ void O3_CPU::do_scheduling(ooo_model_instr& instr)
   for (auto& dreg : instr.destination_registers) {
     // rename destination register
     dreg = reg_allocator.rename_dest_register(dreg, instr.instr_id);
+  }
+
+  for (auto dreg : destination_arch_regs) {
+    reg_allocator.write_arch_history(static_cast<uint8_t>(dreg), destination_history);
   }
 
   instr.scheduled = true;

@@ -63,6 +63,7 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
   long long simulation_instructions = std::numeric_limits<long long>::max();
   std::string json_file_name;
   std::vector<std::string> trace_names;
+  std::vector<std::string> op_trace_names;
 
   auto set_heartbeat_callback = [&](auto) {
     for (O3_CPU& cpu : gen_environment.cpu_view()) {
@@ -84,6 +85,9 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
       app.add_option("--json", json_file_name, "The name of the file to receive JSON output. If no name is specified, stdout will be used")->expected(0, 1);
 
   app.add_option("traces", trace_names, "The paths to the traces")->required()->expected(NUM_CPUS)->check(CLI::ExistingFile);
+  app.add_option("--op-traces", op_trace_names, "Optional Track☆Maker sidecar traces aligned one-to-one with the primary traces")
+      ->expected(NUM_CPUS)
+      ->check(CLI::ExistingFile);
 
   CLI11_PARSE(app, argc, argv);
 
@@ -105,9 +109,11 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
   }
 
   std::vector<champsim::tracereader> traces;
-  std::transform(
-      std::begin(trace_names), std::end(trace_names), std::back_inserter(traces),
-      [knob_cloudsuite, repeat = simulation_given, i = uint8_t(0)](auto name) mutable { return get_tracereader(name, i++, knob_cloudsuite, repeat); });
+  traces.reserve(std::size(trace_names));
+  for (std::size_t i = 0; i < std::size(trace_names); ++i) {
+    const auto& op_name = op_trace_names.empty() ? std::string{} : op_trace_names.at(i);
+    traces.push_back(get_tracereader(trace_names.at(i), op_name, static_cast<uint8_t>(i), knob_cloudsuite, simulation_given));
+  }
 
   std::vector<champsim::phase_info> phases{
       {champsim::phase_info{"Warmup", true, warmup_instructions, std::vector<std::size_t>(std::size(trace_names), 0), trace_names},

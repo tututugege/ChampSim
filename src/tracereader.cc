@@ -49,13 +49,107 @@ champsim::tracereader get_tracereader_for_type(std::string fname, uint8_t cpu)
 
   return champsim::tracereader{R<T, std::ifstream>(cpu, fname)};
 }
+
+using gzip_stream = champsim::inf_istream<champsim::decomp_tags::gzip_tag_t<>>;
+using lzma_stream = champsim::inf_istream<champsim::decomp_tags::lzma_tag_t<>>;
+using bzip2_stream = champsim::inf_istream<champsim::decomp_tags::bzip2_tag_t>;
+
+template <template <class, class, class> typename R, typename T, typename PF, typename OF>
+champsim::tracereader make_merged_tracereader(uint8_t cpu, std::string fname, std::string op_fname)
+{
+  return champsim::tracereader{R<T, PF, OF>{cpu, std::move(fname), std::move(op_fname)}};
+}
+
+template <template <class, class, class> typename R, typename T>
+champsim::tracereader get_merged_tracereader_for_type(std::string fname, std::string op_fname, uint8_t cpu)
+{
+  const bool trace_gzip = (fname.substr(std::size(fname) - 2) == "gz");
+  const bool trace_lzma = (fname.substr(std::size(fname) - 2) == "xz");
+  const bool trace_bzip2 = (fname.substr(std::size(fname) - 3) == "bz2");
+
+  const bool op_gzip = (op_fname.substr(std::size(op_fname) - 2) == "gz");
+  const bool op_lzma = (op_fname.substr(std::size(op_fname) - 2) == "xz");
+  const bool op_bzip2 = (op_fname.substr(std::size(op_fname) - 3) == "bz2");
+
+  if (trace_gzip) {
+    if (op_gzip) {
+      return make_merged_tracereader<R, T, gzip_stream, gzip_stream>(cpu, std::move(fname), std::move(op_fname));
+    }
+    if (op_lzma) {
+      return make_merged_tracereader<R, T, gzip_stream, lzma_stream>(cpu, std::move(fname), std::move(op_fname));
+    }
+    if (op_bzip2) {
+      return make_merged_tracereader<R, T, gzip_stream, bzip2_stream>(cpu, std::move(fname), std::move(op_fname));
+    }
+
+    return make_merged_tracereader<R, T, gzip_stream, std::ifstream>(cpu, std::move(fname), std::move(op_fname));
+  }
+
+  if (trace_lzma) {
+    if (op_gzip) {
+      return make_merged_tracereader<R, T, lzma_stream, gzip_stream>(cpu, std::move(fname), std::move(op_fname));
+    }
+    if (op_lzma) {
+      return make_merged_tracereader<R, T, lzma_stream, lzma_stream>(cpu, std::move(fname), std::move(op_fname));
+    }
+    if (op_bzip2) {
+      return make_merged_tracereader<R, T, lzma_stream, bzip2_stream>(cpu, std::move(fname), std::move(op_fname));
+    }
+
+    return make_merged_tracereader<R, T, lzma_stream, std::ifstream>(cpu, std::move(fname), std::move(op_fname));
+  }
+
+  if (trace_bzip2) {
+    if (op_gzip) {
+      return make_merged_tracereader<R, T, bzip2_stream, gzip_stream>(cpu, std::move(fname), std::move(op_fname));
+    }
+    if (op_lzma) {
+      return make_merged_tracereader<R, T, bzip2_stream, lzma_stream>(cpu, std::move(fname), std::move(op_fname));
+    }
+    if (op_bzip2) {
+      return make_merged_tracereader<R, T, bzip2_stream, bzip2_stream>(cpu, std::move(fname), std::move(op_fname));
+    }
+
+    return make_merged_tracereader<R, T, bzip2_stream, std::ifstream>(cpu, std::move(fname), std::move(op_fname));
+  }
+
+  if (op_gzip) {
+    return make_merged_tracereader<R, T, std::ifstream, gzip_stream>(cpu, std::move(fname), std::move(op_fname));
+  }
+  if (op_lzma) {
+    return make_merged_tracereader<R, T, std::ifstream, lzma_stream>(cpu, std::move(fname), std::move(op_fname));
+  }
+  if (op_bzip2) {
+    return make_merged_tracereader<R, T, std::ifstream, bzip2_stream>(cpu, std::move(fname), std::move(op_fname));
+  }
+
+  return make_merged_tracereader<R, T, std::ifstream, std::ifstream>(cpu, std::move(fname), std::move(op_fname));
+}
 } // namespace champsim
 
 template <typename T, typename S>
 using repeatable_reader_t = champsim::repeatable<champsim::bulk_tracereader<T, S>, uint8_t, std::string>;
+template <typename T, typename S, typename O>
+using repeatable_merged_reader_t = champsim::repeatable<champsim::bulk_merged_tracereader<T, S, O>, uint8_t, std::string, std::string>;
 
-champsim::tracereader get_tracereader(const std::string& fname, uint8_t cpu, bool is_cloudsuite, bool repeat)
+champsim::tracereader get_tracereader(const std::string& fname, const std::string& op_fname, uint8_t cpu, bool is_cloudsuite, bool repeat)
 {
+  if (!op_fname.empty()) {
+    if (is_cloudsuite && repeat) {
+      return champsim::get_merged_tracereader_for_type<repeatable_merged_reader_t, cloudsuite_instr>(fname, op_fname, cpu);
+    }
+
+    if (is_cloudsuite && !repeat) {
+      return champsim::get_merged_tracereader_for_type<champsim::bulk_merged_tracereader, cloudsuite_instr>(fname, op_fname, cpu);
+    }
+
+    if (!is_cloudsuite && repeat) {
+      return champsim::get_merged_tracereader_for_type<repeatable_merged_reader_t, input_instr>(fname, op_fname, cpu);
+    }
+
+    return champsim::get_merged_tracereader_for_type<champsim::bulk_merged_tracereader, input_instr>(fname, op_fname, cpu);
+  }
+
   if (is_cloudsuite && repeat) {
     return champsim::get_tracereader_for_type<repeatable_reader_t, cloudsuite_instr>(fname, cpu);
   }

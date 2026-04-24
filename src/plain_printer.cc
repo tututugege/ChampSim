@@ -17,6 +17,7 @@
 #include <cmath>
 #include <numeric>
 #include <ratio>
+#include <algorithm>
 #include <string_view> // for string_view
 #include <utility>
 #include <vector>
@@ -60,6 +61,58 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
   for (auto idx : types) {
     lines.push_back(fmt::format("{}: {}", branch_type_names.at(champsim::to_underlying(idx)),
                                 ::print_ratio(std::kilo::num * stats.branch_type_misses.value_or(idx, 0), stats.instrs())));
+  }
+
+  if (stats.trackmaker_loads > 0) {
+    lines.emplace_back("TrackMaker Load History Summary");
+    lines.push_back(fmt::format("Load-classified instructions: {} load-derived: {} ({})", stats.trackmaker_loads, stats.trackmaker_loads_load_derived,
+                                ::print_ratio(100 * stats.trackmaker_loads_load_derived, stats.trackmaker_loads) + "%"));
+
+    lines.emplace_back("Class distribution");
+    for (std::size_t i = 0; i < stats.trackmaker_load_classes.size(); ++i) {
+      lines.push_back(fmt::format("{}: {} ({})", trackmaker_load_class_names.at(i), stats.trackmaker_load_classes.at(i),
+                                  ::print_ratio(100 * stats.trackmaker_load_classes.at(i), stats.trackmaker_loads) + "%"));
+    }
+
+    lines.emplace_back("Depth distribution");
+    for (auto key : stats.trackmaker_load_depth.get_keys()) {
+      lines.push_back(fmt::format("depth {}: {}", key, stats.trackmaker_load_depth.value_or(key, 0)));
+    }
+
+    lines.emplace_back("Complexity distribution");
+    for (auto key : stats.trackmaker_load_complexity.get_keys()) {
+      lines.push_back(fmt::format("complexity {}: {}", key, stats.trackmaker_load_complexity.value_or(key, 0)));
+    }
+
+    lines.emplace_back("Last-token distribution");
+    for (auto key : stats.trackmaker_load_last_token.get_keys()) {
+      lines.push_back(
+          fmt::format("{}: {}", trackmaker_op_token_names.at(key), stats.trackmaker_load_last_token.value_or(key, 0)));
+    }
+
+    lines.emplace_back("History-bit patterns");
+    for (auto key : stats.trackmaker_load_history_bits.get_keys()) {
+      lines.push_back(fmt::format("{:#08x}: {}", key, stats.trackmaker_load_history_bits.value_or(key, 0)));
+    }
+
+    if (!stats.trackmaker_load_pc_classes.empty()) {
+      std::vector<std::pair<uint64_t, uint64_t>> hot_pcs;
+      hot_pcs.reserve(stats.trackmaker_load_pc_classes.size());
+      for (const auto& [pc, class_counts] : stats.trackmaker_load_pc_classes) {
+        hot_pcs.emplace_back(pc, std::accumulate(std::begin(class_counts), std::end(class_counts), uint64_t{0}));
+      }
+      std::sort(std::begin(hot_pcs), std::end(hot_pcs), [](const auto& lhs, const auto& rhs) { return lhs.second > rhs.second; });
+
+      lines.emplace_back("Top load PCs");
+      for (std::size_t i = 0; i < std::min<std::size_t>(8, hot_pcs.size()); ++i) {
+        const auto [pc, total] = hot_pcs[i];
+        const auto& class_counts = stats.trackmaker_load_pc_classes.at(pc);
+        auto dominant_it = std::max_element(std::begin(class_counts), std::end(class_counts));
+        const auto dominant_class = static_cast<std::size_t>(std::distance(std::begin(class_counts), dominant_it));
+        lines.push_back(fmt::format("pc {:#x}: total {} dominant {} ({})", pc, total, trackmaker_load_class_names.at(dominant_class),
+                                    ::print_ratio(100 * *dominant_it, total) + "%"));
+      }
+    }
   }
 
   return lines;

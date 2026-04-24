@@ -1,5 +1,7 @@
 .csconfig/
 _configuration.mk
+.codex
+pintool.log
 
 **/__pycache__/
 *.pyc
@@ -30,3 +32,10 @@ compile_commands.json
 
 .vscode/
 **/.DS_Store
+
+# TrackMaker local/generated artifacts
+Track☆Maker/window_scan/
+Track☆Maker/traces_loadheavy_skip*/
+Track☆Maker/traces_nopie_skip*/
+Track☆Maker/traces_skip*/
+Track☆Maker/traces/local/

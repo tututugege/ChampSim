@@ -95,6 +95,16 @@ struct program_ordered {
 } // namespace champsim
 
 struct ooo_model_instr : champsim::program_ordered<ooo_model_instr> {
+  struct op_trace_metadata {
+    bool valid = false;
+    uint32_t category = 0;
+    uint32_t opcode = 0;
+    uint8_t token = TK_OP_NONE;
+    uint8_t flags = 0;
+    uint8_t branch_taken = 0;
+    uint8_t mem_operand_count = 0;
+  };
+
   champsim::address ip{};
   champsim::chrono::clock::time_point ready_time{};
 
@@ -124,6 +134,7 @@ struct ooo_model_instr : champsim::program_ordered<ooo_model_instr> {
 
   std::vector<champsim::address> destination_memory = {};
   std::vector<champsim::address> source_memory = {};
+  op_trace_metadata op_trace = {};
 
   // these are indices of instructions in the ROB that depend on me
   std::vector<std::reference_wrapper<ooo_model_instr>> registers_instrs_depend_on_me;
@@ -194,6 +205,17 @@ private:
 public:
   ooo_model_instr(uint8_t cpu, input_instr instr) : ooo_model_instr(instr, {cpu, cpu}) {}
   ooo_model_instr(uint8_t /*cpu*/, cloudsuite_instr instr) : ooo_model_instr(instr, {instr.asid[0], instr.asid[1]}) {}
+
+  void apply_op_trace(const op_trace_instr& trace)
+  {
+    op_trace.valid = true;
+    op_trace.category = trace.category;
+    op_trace.opcode = trace.opcode;
+    op_trace.token = trace.token;
+    op_trace.flags = trace.flags;
+    op_trace.branch_taken = trace.branch_taken;
+    op_trace.mem_operand_count = trace.mem_operand_count;
+  }
 
   [[nodiscard]] std::size_t num_mem_ops() const { return std::size(destination_memory) + std::size(source_memory); }
 };

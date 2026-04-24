@@ -11,6 +11,7 @@ RegisterAllocator::RegisterAllocator(size_t num_physical_registers)
   physical_register_file = std::vector<physical_register>(num_physical_registers, {0, 0, false, false});
   frontend_RAT.fill(-1); // default value for no mapping
   backend_RAT.fill(-1);
+  arch_history_table.fill({});
 }
 
 PHYSICAL_REGISTER_ID RegisterAllocator::rename_dest_register(int16_t reg, champsim::program_ordered<ooo_model_instr>::id_type producer_id)
@@ -79,6 +80,10 @@ int RegisterAllocator::count_reg_dependencies(const ooo_model_instr& instr) cons
 {
   return static_cast<int>(std::count_if(std::begin(instr.source_registers), std::end(instr.source_registers), [this](auto reg) { return !isValid(reg); }));
 }
+
+register_history RegisterAllocator::read_arch_history(uint8_t archreg) const { return arch_history_table[archreg]; }
+
+void RegisterAllocator::write_arch_history(uint8_t archreg, const register_history& history) { arch_history_table[archreg] = history; }
 
 void RegisterAllocator::reset_frontend_RAT()
 {

@@ -17,7 +17,10 @@
 #ifndef TRACE_INSTRUCTION_H
 #define TRACE_INSTRUCTION_H
 
+#include <array>
+#include <cstdint>
 #include <limits>
+#include <string_view>
 
 // special registers that help us identify branches
 namespace champsim
@@ -63,6 +66,31 @@ struct cloudsuite_instr {
   unsigned long long source_memory[NUM_INSTR_SOURCES];                 // input memory
 
   unsigned char asid[2];
+};
+
+enum trackmaker_op_token : uint8_t {
+  TK_OP_NONE = 0,
+  TK_OP_LOAD = 1,
+  TK_OP_MOV = 2,
+  TK_OP_ADD = 3,
+  TK_OP_SHIFT = 4,
+  TK_OP_MUL = 5,
+  TK_OP_LEA = 6,
+  TK_OP_OTHER = 7
+};
+
+using namespace std::literals::string_view_literals;
+inline constexpr std::array trackmaker_op_token_names{"NONE"sv, "LOAD"sv, "MOV"sv, "ADD"sv, "SHIFT"sv, "MUL"sv, "LEA"sv, "OTHER"sv};
+
+struct op_trace_instr {
+  uint64_t instr_num;
+  uint64_t ip;
+  uint32_t category;
+  uint32_t opcode;
+  uint8_t token;
+  uint8_t flags;
+  uint8_t branch_taken;
+  uint8_t mem_operand_count;
 };
 // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
 

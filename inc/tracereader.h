@@ -21,6 +21,8 @@
 #include <deque>
 #include <memory>
 #include <numeric>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 
@@ -97,6 +99,86 @@ public:
   [[nodiscard]] bool eof() const { return trace_file.eof() && std::size(instr_buffer) <= refresh_thresh; }
 };
 
+template <typename T, typename F>
+class bulk_record_reader
+{
+  static_assert(std::is_trivial_v<T>);
+  static_assert(std::is_standard_layout_v<T>);
+
+  bool eof_ = false;
+  F trace_file;
+
+  constexpr static std::size_t buffer_size = 128;
+  constexpr static std::size_t refresh_thresh = 1;
+  std::deque<T> record_buffer;
+
+public:
+  T operator()();
+
+  bulk_record_reader(std::string tf) : trace_file(tf) {}
+  bulk_record_reader(F&& file) : trace_file(std::move(file)) {}
+
+  [[nodiscard]] bool eof() const { return trace_file.eof() && std::size(record_buffer) <= refresh_thresh; }
+};
+
+template <typename T, typename PF, typename OF>
+class bulk_merged_tracereader
+{
+  uint8_t cpu;
+  std::string trace_name;
+  std::string op_trace_name;
+  bulk_tracereader<T, PF> instr_reader;
+  bulk_record_reader<op_trace_instr, OF> op_reader;
+  uint64_t local_instr_num = 0;
+  std::optional<uint64_t> op_trace_base_instr_num{};
+
+public:
+  bulk_merged_tracereader(uint8_t cpu_idx, std::string tf, std::string op_tf)
+      : cpu(cpu_idx), trace_name(tf), op_trace_name(op_tf), instr_reader(cpu_idx, trace_name), op_reader(op_trace_name)
+  {
+  }
+
+  [[nodiscard]] bool eof() const
+  {
+    if (instr_reader.eof() != op_reader.eof()) {
+      throw std::runtime_error("Track☆Maker: primary trace and optrace reached EOF at different times");
+    }
+
+    return instr_reader.eof();
+  }
+
+  ooo_model_instr operator()()
+  {
+    if (instr_reader.eof() || op_reader.eof()) {
+      throw std::runtime_error("Track☆Maker: attempted to read past the end of the primary trace or optrace");
+    }
+
+    auto instr = instr_reader();
+    auto op_trace = op_reader();
+
+    if (instr.ip.template to<uint64_t>() != op_trace.ip) {
+      throw std::runtime_error("Track☆Maker: IP mismatch between primary trace and optrace");
+    }
+
+    if (!op_trace_base_instr_num.has_value()) {
+      op_trace_base_instr_num = op_trace.instr_num;
+    }
+
+    if ((op_trace.instr_num - *op_trace_base_instr_num) != local_instr_num) {
+      throw std::runtime_error("Track☆Maker: dynamic instruction index mismatch between primary trace and optrace");
+    }
+
+    (void)cpu;
+    (void)trace_name;
+    (void)op_trace_name;
+
+    instr.apply_op_trace(op_trace);
+    ++local_instr_num;
+
+    return instr;
+  }
+};
+
 ooo_model_instr apply_branch_target(ooo_model_instr branch, const ooo_model_instr& target);
 
 template <typename It>
@@ -138,9 +220,34 @@ ooo_model_instr bulk_tracereader<T, F>::operator()()
   return retval;
 }
 
+template <typename T, typename F>
+T bulk_record_reader<T, F>::operator()()
+{
+  if (std::size(record_buffer) <= refresh_thresh) {
+    std::array<T, buffer_size - refresh_thresh> trace_read_buf;
+    std::array<char, std::size(trace_read_buf) * sizeof(T)> raw_buf;
+    std::size_t bytes_read;
+
+    trace_file.read(std::data(raw_buf), std::size(raw_buf));
+    bytes_read = static_cast<std::size_t>(trace_file.gcount());
+    eof_ = trace_file.eof();
+
+    std::memcpy(std::data(trace_read_buf), std::data(raw_buf), bytes_read);
+
+    auto begin = std::begin(trace_read_buf);
+    auto end = std::next(begin, bytes_read / sizeof(T));
+    std::copy(begin, end, std::back_inserter(record_buffer));
+  }
+
+  auto retval = record_buffer.front();
+  record_buffer.pop_front();
+
+  return retval;
+}
+
 std::string get_fptr_cmd(std::string_view fname);
 } // namespace champsim
 
-champsim::tracereader get_tracereader(const std::string& fname, uint8_t cpu, bool is_cloudsuite, bool repeat);
+champsim::tracereader get_tracereader(const std::string& fname, const std::string& op_fname, uint8_t cpu, bool is_cloudsuite, bool repeat);
 
 #endif
